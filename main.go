@@ -20,31 +20,33 @@ import (
 )
 
 const (
-	defaultWatchFile      = "./watch_list.txt"
-	defaultPollInterval   = 30
-	defaultReloadInterval = 1500
-	defaultInfluxLimit    = 5000
-	influxMeasurement     = "nginx_access_log"
-	auditStateRowID       = 1
-	defaultMailFromName   = "CIDR Watcher"
-	defaultMailFromAddr   = "no-reply@melroy.org"
-	defaultMailThreshold  = int64(10)
+	defaultWatchFile         = "./watch_list.txt"
+	defaultPollInterval      = 30
+	defaultReloadInterval    = 1500
+	defaultInfluxLimit       = 5000
+	defaultInfluxMeasurement = "nginx_access_log"
+	defaultInfluxDB          = "telegraf"
+	auditStateRowID          = 1
+	defaultMailFromName      = "CIDR Watcher"
+	defaultMailFromAddr      = "no-reply@melroy.org"
+	defaultMailThreshold     = int64(10)
 )
 
 type Config struct {
-	InfluxUnixSock string
-	InfluxDB       string
-	InfluxUser     string
-	InfluxPass     string
-	MySQLDSN       string
-	WatchFile      string
-	PollInterval   time.Duration
-	ReloadInterval time.Duration
-	InfluxLimit    int
-	MailFromName   string
-	MailFromAddr   string
-	MailTo         string
-	MailThreshold  int64
+	InfluxUnixSock    string
+	InfluxDB          string
+	InfluxMeasurement string
+	InfluxUser        string
+	InfluxPass        string
+	MySQLDSN          string
+	WatchFile         string
+	PollInterval      time.Duration
+	ReloadInterval    time.Duration
+	InfluxLimit       int
+	MailFromName      string
+	MailFromAddr      string
+	MailTo            string
+	MailThreshold     int64
 }
 
 type Watcher struct {
@@ -151,14 +153,6 @@ func loadConfig() Config {
 		}
 	}
 
-	limit := defaultInfluxLimit
-	if lv := os.Getenv("INFLUX_QUERY_LIMIT"); lv != "" {
-		if vi, err := strconv.Atoi(lv); err == nil {
-			limit = vi
-		} else {
-			log.Printf("invalid INFLUX_QUERY_LIMIT %q, using default %d: %v", lv, defaultInfluxLimit, err)
-		}
-	}
 	// mail config
 	mailFromName := os.Getenv("MAIL_FROM_NAME")
 	if mailFromName == "" {
@@ -178,9 +172,23 @@ func loadConfig() Config {
 		}
 	}
 	// influx
+	limit := defaultInfluxLimit
+	if lv := os.Getenv("INFLUX_QUERY_LIMIT"); lv != "" {
+		if vi, err := strconv.Atoi(lv); err == nil {
+			limit = vi
+		} else {
+			log.Printf("invalid INFLUX_QUERY_LIMIT %q, using default %d: %v", lv, defaultInfluxLimit, err)
+		}
+	}
+
+	influxMeasurement := strings.TrimSpace(os.Getenv("INFLUX_MEASUREMENT"))
+	if influxMeasurement == "" {
+		influxMeasurement = defaultInfluxMeasurement
+	}
+
 	influxDB := strings.TrimSpace(os.Getenv("INFLUX_DB"))
 	if influxDB == "" {
-		influxDB = "telegraf"
+		influxDB = defaultInfluxDB
 	}
 	influxUser := strings.TrimSpace(os.Getenv("INFLUX_USER"))
 	influxPass := strings.TrimSpace(os.Getenv("INFLUX_PASS"))
@@ -200,19 +208,20 @@ func loadConfig() Config {
 	}
 
 	return Config{
-		InfluxUnixSock: influxUnixSock,
-		InfluxDB:       influxDB,
-		InfluxUser:     influxUser,
-		InfluxPass:     influxPass,
-		MySQLDSN:       mysqlDSN,
-		WatchFile:      watchFile,
-		PollInterval:   time.Duration(poll) * time.Second,
-		ReloadInterval: time.Duration(reload) * time.Second,
-		InfluxLimit:    limit,
-		MailFromName:   mailFromName,
-		MailFromAddr:   mailFromAddr,
-		MailTo:         mailTo,
-		MailThreshold:  mailThreshold,
+		InfluxUnixSock:    influxUnixSock,
+		InfluxDB:          influxDB,
+		InfluxMeasurement: influxMeasurement,
+		InfluxUser:        influxUser,
+		InfluxPass:        influxPass,
+		MySQLDSN:          mysqlDSN,
+		WatchFile:         watchFile,
+		PollInterval:      time.Duration(poll) * time.Second,
+		ReloadInterval:    time.Duration(reload) * time.Second,
+		InfluxLimit:       limit,
+		MailFromName:      mailFromName,
+		MailFromAddr:      mailFromAddr,
+		MailTo:            mailTo,
+		MailThreshold:     mailThreshold,
 	}
 }
 
@@ -341,11 +350,11 @@ func (w *Watcher) pollOnce() error {
 	// build query
 	var q string
 	if w.lastProcessed == 0 {
-		q = fmt.Sprintf("SELECT time, remote_ip FROM %s ORDER BY time ASC LIMIT %d", influxMeasurement, w.cfg.InfluxLimit)
+		q = fmt.Sprintf("SELECT time, remote_ip FROM %s ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, w.cfg.InfluxLimit)
 	} else {
 		// convert lastProcessed (ns) -> RFC3339Nano
 		time := time.Unix(0, w.lastProcessed).UTC().Format(time.RFC3339Nano)
-		q = fmt.Sprintf("SELECT time, remote_ip FROM %s WHERE time > '%s' ORDER BY time ASC LIMIT %d", influxMeasurement, time, w.cfg.InfluxLimit)
+		q = fmt.Sprintf("SELECT time, remote_ip FROM %s WHERE time > '%s' ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, time, w.cfg.InfluxLimit)
 	}
 
 	resp, err := queryInflux(w.influxCli, w.cfg.InfluxDB, q)
