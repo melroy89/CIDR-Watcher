@@ -1,0 +1,16 @@
+image: golang:latest
+
+stages:
+  - test
+  - build
+
+format:
+  stage: test
+  script:
+    - go fmt $(go list ./... | grep -v /vendor/)
+    - go vet $(go list ./... | grep -v /vendor/)
+
+build:
+  stage: build
+  script:
+    - go build
