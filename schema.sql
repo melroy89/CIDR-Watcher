@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS audit_ips (
 -- 3) audit_state: single-row table storing last processed Influx timestamp (unix nanoseconds)
 CREATE TABLE IF NOT EXISTS audit_state (
     id INT PRIMARY KEY,
-    last_processed BIGINT UNSIGNED NOT NULL
+    last_processed_timestamp BIGINT UNSIGNED NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- seed initial state row if missing

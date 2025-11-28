@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -14,7 +15,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	influx "github.com/influxdata/influxdb1-client"
+	client "github.com/influxdata/influxdb1-client/v2"
 	"github.com/joho/godotenv"
 	mail "github.com/wneessen/go-mail"
 )
@@ -24,25 +25,27 @@ const (
 	defaultPollInterval      = 30
 	defaultReloadInterval    = 1500
 	defaultInfluxLimit       = 5000
+	defaultInfluxAddr        = "http://localhost:8086"
 	defaultInfluxMeasurement = "nginx_access_log"
 	defaultInfluxDB          = "telegraf"
 	auditStateRowID          = 1
 	defaultMailFromName      = "CIDR Watcher"
 	defaultMailFromAddr      = "no-reply@melroy.org"
 	defaultMailThreshold     = int64(10)
+	influxPrecision          = "ns"
 )
 
 type Config struct {
-	InfluxUnixSock    string
+	InfluxAddr        string
 	InfluxDB          string
 	InfluxMeasurement string
 	InfluxUser        string
 	InfluxPass        string
+	InfluxLimit       int
 	MySQLDSN          string
 	WatchFile         string
 	PollInterval      time.Duration
 	ReloadInterval    time.Duration
-	InfluxLimit       int
 	MailFromName      string
 	MailFromAddr      string
 	MailTo            string
@@ -51,12 +54,11 @@ type Config struct {
 
 type Watcher struct {
 	mu            sync.RWMutex
-	running       bool
 	cfg           Config
-	influxClient  *influx.Client
+	influxClient  client.Client
 	sqlDB         *sql.DB
 	cidrs         []*net.IPNet
-	lastProcessed int64 // unix nanoseconds
+	lastTimestamp int64 // unix nanoseconds
 }
 
 func main() {
@@ -94,36 +96,12 @@ func main() {
 	}()
 
 	// main loop
-	ticker := time.NewTicker(w.cfg.PollInterval)
-	defer ticker.Stop()
-	w.pollOnce()
-	for {
-		err := w.pollOnce()
-		if err != nil {
-			log.Printf("poll error: %v", err)
-		}
-		<-ticker.C
-	}
-}
-
-func (w *Watcher) Start() error {
-	w.mu.Lock()
-	if w.running {
-		w.mu.Unlock()
-		return nil
-	}
-	w.running = true
-	w.mu.Unlock()
-
-	// Start loop
-	go w.loop()
-	return nil
+	w.loop()
 }
 
 func (w *Watcher) loop() {
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
-	w.pollOnce()
 	for {
 		err := w.pollOnce()
 		if err != nil {
@@ -192,11 +170,11 @@ func loadConfig() Config {
 	}
 	influxUser := strings.TrimSpace(os.Getenv("INFLUX_USER"))
 	influxPass := strings.TrimSpace(os.Getenv("INFLUX_PASS"))
-	influxUnixSock := strings.TrimSpace(os.Getenv("INFLUX_UNIX_SOCKET"))
-	if influxUnixSock == "" {
-		influxUnixSock = "/var/run/influxdb/influxdb.sock"
+	influxAddr := strings.TrimSpace(os.Getenv("INFLUX_ADDR"))
+	if influxAddr == "" {
+		influxAddr = defaultInfluxAddr
 	}
-	// mysql
+	// MariaDB
 	mysqlDSN := os.Getenv("MYSQL_DSN")
 	// Default to unix socket at /var/run/mysqld/mysqld.sock when MYSQL_DSN not provided
 	if mysqlDSN == "" {
@@ -208,16 +186,16 @@ func loadConfig() Config {
 	}
 
 	return Config{
-		InfluxUnixSock:    influxUnixSock,
+		InfluxAddr:        influxAddr,
 		InfluxDB:          influxDB,
 		InfluxMeasurement: influxMeasurement,
 		InfluxUser:        influxUser,
 		InfluxPass:        influxPass,
+		InfluxLimit:       limit,
 		MySQLDSN:          mysqlDSN,
 		WatchFile:         watchFile,
 		PollInterval:      time.Duration(poll) * time.Second,
 		ReloadInterval:    time.Duration(reload) * time.Second,
-		InfluxLimit:       limit,
 		MailFromName:      mailFromName,
 		MailFromAddr:      mailFromAddr,
 		MailTo:            mailTo,
@@ -226,25 +204,25 @@ func loadConfig() Config {
 }
 
 func (w *Watcher) init() error {
-	// influx client (use socket file)
-	cfg := influx.Config{
-		Username:   w.cfg.InfluxUser,
-		Password:   w.cfg.InfluxPass,
-		UnixSocket: w.cfg.InfluxUnixSock,
-		Timeout:    10 * time.Second,
-		UserAgent:  "CIDRWatcher",
-	}
-
-	con, err := influx.NewClient(cfg)
+	// influxdbv1
+	con, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr:      w.cfg.InfluxAddr,
+		Username:  w.cfg.InfluxUser,
+		Password:  w.cfg.InfluxPass,
+		Timeout:   10 * time.Second,
+		UserAgent: "CIDRWatcher",
+	})
 	if err != nil {
-		return fmt.Errorf("create influx client: %w", err)
+		log.Fatalln("Error creating InfluxDB Client: %w", err.Error())
 	}
+	defer con.Close()
 	w.influxClient = con
 
 	// mysql
 	db, err := sql.Open("mysql", w.cfg.MySQLDSN)
 	if err != nil {
-		return fmt.Errorf("open mysql: %w", err)
+		log.Fatalln("Unable to create MySQL client: %w", err)
+		return err
 	}
 	db.SetMaxOpenConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
@@ -258,6 +236,7 @@ func (w *Watcher) init() error {
 	// load CIDRs initially
 	if err := w.loadCIDRs(); err != nil {
 		log.Printf("warning: failed to load watchlist at startup: %v", err)
+		return err
 	}
 
 	return nil
@@ -307,210 +286,115 @@ func (w *Watcher) loadCIDRs() error {
 	return nil
 }
 
-func (w *Watcher) loadState() error {
-	// Use transaction for safety.
-	tx, err := w.sqlDB.Begin()
-	if err != nil {
-		return err
-	}
-
-	// try select
-	var last sql.NullInt64
-	err = tx.QueryRow("SELECT last_processed FROM audit_state WHERE id = ?", auditStateRowID).Scan(&last)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			_, err = tx.Exec("INSERT INTO audit_state (id, last_processed) VALUES (?, ?)", auditStateRowID, 0)
-			if err != nil {
-				_ = tx.Rollback()
-				return err
-			}
-			w.lastProcessed = 0
-		} else {
-			_ = tx.Rollback()
-			return err
-		}
-	} else {
-		if last.Valid {
-			w.lastProcessed = last.Int64
-		} else {
-			w.lastProcessed = 0
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		// commit failed; attempt rollback and return the commit error
-		_ = tx.Rollback()
-		return err
-	}
-	log.Printf("last_processed loaded: %d (unix-ns)", w.lastProcessed)
-	return nil
-}
-
 func (w *Watcher) pollOnce() error {
+	// Be sure to get the latest last_processed_timestamp directly from MariaDB
+	// Which will update w.lastTimestamp...
+	w.retrieveLastTimestamp()
+
 	// build query
 	var q string
-	if w.lastProcessed == 0 {
-		q = fmt.Sprintf("SELECT time, remote_ip FROM %s ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, w.cfg.InfluxLimit)
+	if w.lastTimestamp == 0 {
+		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, w.cfg.InfluxLimit)
 	} else {
-		// convert lastProcessed (ns) -> RFC3339Nano
-		time := time.Unix(0, w.lastProcessed).UTC().Format(time.RFC3339Nano)
-		q = fmt.Sprintf("SELECT time, remote_ip FROM %s WHERE time > '%s' ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, time, w.cfg.InfluxLimit)
+		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s WHERE time > %d ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, w.lastTimestamp, w.cfg.InfluxLimit)
 	}
 
-	resp, err := queryInflux(w.influxClient, w.cfg.InfluxDB, q)
-	if err != nil {
+	log.Printf("InfluxDB Query: %s", q)
+	newQuery := client.NewQuery(q, w.cfg.InfluxDB, influxPrecision)
+	resp, err := w.influxClient.Query(newQuery)
+	if err != nil || resp.Error() != nil {
 		return fmt.Errorf("influx query: %w", err)
 	}
 
-	if len(resp) == 0 {
-		// nothing new
+	if len(resp.Results) == 0 || resp.Results[0].Series == nil {
+		// Nothing new
 		return nil
 	}
 
-	// process rows
-	var maxSeen int64 = w.lastProcessed
-	var processed int
-	for _, res := range resp {
-		if res.Series == nil {
-			// no data
+	series := resp.Results[0].Series[0]
+	for _, row := range series.Values {
+		var (
+			timestamp     int64
+			remoteIp      string
+			userAgent     string
+			bodySentBytes int64
+			domainname    string
+			httpMethod    string
+			referrer      string
+			responseCode  int
+			url           string
+		)
+		for i, colName := range series.Columns {
+			if colName == "time" {
+				// timeStamp will be used in the state table later
+				timestamp, err = (row[i]).(json.Number).Int64()
+				if err != nil {
+					log.Println("Unable to parse time column from InfluxDB, skipping")
+					continue
+				}
+				log.Printf("Time found: %d", timestamp)
+			}
+			if colName == "remote_ip" {
+				if s, ok := row[i].(string); ok {
+					remoteIp = s
+				}
+			}
+			if colName == "agent" {
+				if s, ok := row[i].(string); ok {
+					userAgent = s
+				}
+			}
+			if colName == "body_sent_bytes" {
+				if n, ok := row[i].(json.Number); ok {
+					bodySentBytes, _ = n.Int64()
+				}
+			}
+			if colName == "domainname" {
+				if s, ok := row[i].(string); ok {
+					domainname = s
+				}
+			}
+			if colName == "http_method" {
+				if s, ok := row[i].(string); ok {
+					httpMethod = s
+				}
+			}
+			if colName == "referrer" {
+				if s, ok := row[i].(string); ok {
+					referrer = s
+				}
+			}
+			if colName == "response_code" {
+				if n, ok := row[i].(json.Number); ok {
+					responseCode, _ = strconv.Atoi(n.String())
+				}
+			}
+			if colName == "url" {
+				if s, ok := row[i].(string); ok {
+					url = s
+				}
+			}
+		}
+		w.lastTimestamp = timestamp
+
+		if remoteIp == "" {
+			// No remote IP? That is weird, skip.
+			log.Printf("row with empty remote_ip, skipping")
 			continue
 		}
-		for _, series := range res.Series {
-			// find indices for time and remote_ip
-			timeIdx := -1
-			remoteIpIdx := -1
-			userAgentIdx := -1
-			bodySentBytesIdx := -1
-			domainnameIdx := -1
-			httpMethodIdx := -1
-			referrerIdx := -1
-			responseCodeIdx := -1
-			urlIdx := -1
-			for i, col := range series.Columns {
-				if col == "time" {
-					timeIdx = i
-				}
-				if col == "agent" {
-					userAgentIdx = i
-				}
-				if col == "body_sent_bytes" {
-					bodySentBytesIdx = i
-				}
-				if col == "domainname" {
-					domainnameIdx = i
-				}
-				if col == "http_method" {
-					httpMethodIdx = i
-				}
-				if col == "referrer" {
-					referrerIdx = i
-				}
-				if col == "remote_ip" {
-					remoteIpIdx = i
-				}
-				if col == "response_code" {
-					responseCodeIdx = i
-				}
-				if col == "url" {
-					urlIdx = i
-				}
-			}
 
-			if timeIdx == -1 {
-				log.Printf("series missing time column, skipping")
-				continue
-			}
-			if remoteIpIdx == -1 {
-				// nothing to check
-				continue
-			}
-
-			for _, row := range series.Values {
-				processed++
-				// time is usually string in RFC3339
-				timeStr, ok := row[timeIdx].(string)
-				if !ok {
-					continue
-				}
-				t, err := time.Parse(time.RFC3339Nano, timeStr)
-				if err != nil {
-					// try fallback to parse without nano
-					t2, err2 := time.Parse(time.RFC3339, timeStr)
-					if err2 != nil {
-						log.Printf("failed to parse time '%v': %v / %v", timeStr, err, err2)
-						continue
-					}
-					t = t2
-				}
-				ns := t.UnixNano()
-				if ns > maxSeen {
-					maxSeen = ns
-				}
-
-				// remote_ip column may be string or nil
-				var remoteIp string
-				var userAgent string
-				var bodySentBytes int64
-				var domainname string
-				var httpMethod string
-				var referrer string
-				var responseCode int
-				var url string
-				if row[remoteIpIdx] != nil {
-					remoteIp, _ = row[remoteIpIdx].(string)
-					userAgent, _ = row[userAgentIdx+1].(string)
-					bodySentBytes, _ = row[bodySentBytesIdx+1].(int64)
-					domainname, _ = row[domainnameIdx+1].(string)
-					httpMethod, _ = row[httpMethodIdx+1].(string)
-					referrer, _ = row[referrerIdx+1].(string)
-					responseCode, _ = row[responseCodeIdx+1].(int)
-					url, _ = row[urlIdx+1].(string)
-				}
-				if remoteIp == "" {
-					// No remote IP? That is weird, skip.
-					log.Printf("row with empty remote_ip, skipping")
-					continue
-				}
-
-				// check if IP matches watch list
-				if w.ipMatchesWatchList(remoteIp) {
-					if err := w.upsertIP(remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url); err != nil {
-						log.Printf("upsert remote ip %s error: %v", remoteIp, err)
-					}
-				}
+		// check if IP matches watch list
+		if w.ipMatchesWatchList(remoteIp) {
+			if err := w.upsertIP(remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url); err != nil {
+				log.Printf("upsert remote ip %s error: %v", remoteIp, err)
 			}
 		}
 	}
 
-	// update last processed if changed
-	if maxSeen > w.lastProcessed {
-		if err := w.updateState(maxSeen); err != nil {
-			return fmt.Errorf("update state: %w", err)
-		}
-		w.lastProcessed = maxSeen
-	}
-	if processed > 0 {
-		log.Printf("processed %d rows, last_processed now %d", processed, w.lastProcessed)
+	if err := w.updateState(); err != nil {
+		return fmt.Errorf("failed to update state: %w", err)
 	}
 	return nil
-}
-
-func queryInflux(con *influx.Client, db, cmd string) ([]influx.Result, error) {
-	q := influx.Query{
-		Command:  cmd,
-		Database: db,
-	}
-	resp, err := con.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil {
-		return nil, fmt.Errorf("nil response from influx")
-	}
-	if resp.Error() != nil {
-		return nil, resp.Error()
-	}
-	return resp.Results, nil
 }
 
 func (w *Watcher) ipMatchesWatchList(ipStr string) bool {
@@ -603,7 +487,62 @@ func (w *Watcher) sendNotification(ip string, hits int64) error {
 	return nil
 }
 
-func (w *Watcher) updateState(ns int64) error {
-	_, err := w.sqlDB.Exec("UPDATE audit_state SET last_processed = ? WHERE id = ?", ns, auditStateRowID)
+// Only used once during startup
+func (w *Watcher) loadState() error {
+	// Use transaction for safety.
+	tx, err := w.sqlDB.Begin()
+	if err != nil {
+		return err
+	}
+
+	// try select
+	var last sql.NullInt64
+	err = tx.QueryRow("SELECT last_processed_timestamp FROM audit_state WHERE id = ?", auditStateRowID).Scan(&last)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			_, err = tx.Exec("INSERT INTO audit_state (id, last_processed_timestamp) VALUES (?, ?)", auditStateRowID, 0)
+			if err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			w.lastTimestamp = 0
+		} else {
+			_ = tx.Rollback()
+			return err
+		}
+	} else {
+		if last.Valid {
+			w.lastTimestamp = last.Int64
+		} else {
+			w.lastTimestamp = 0
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		// commit failed; attempt rollback and return the commit error
+		_ = tx.Rollback()
+		return err
+	}
+	log.Printf("last_processed_timestamp loaded: %d (unix-ns)", w.lastTimestamp)
+	return nil
+}
+
+func (w *Watcher) retrieveLastTimestamp() error {
+	var last sql.NullInt64
+	err := w.sqlDB.QueryRow("SELECT last_processed_timestamp FROM audit_state WHERE id = ?", auditStateRowID).Scan(&last)
+	if err != nil {
+		log.Printf("Unable to retrieve last_processed_timestamp: %v", err)
+	} else {
+		if last.Valid {
+			w.lastTimestamp = last.Int64
+		} else {
+			w.lastTimestamp = 0
+		}
+	}
+	return err
+}
+
+func (w *Watcher) updateState() error {
+	_, err := w.sqlDB.Exec("UPDATE audit_state SET last_processed_timestamp = ? WHERE id = ?", w.lastTimestamp, auditStateRowID)
 	return err
 }
