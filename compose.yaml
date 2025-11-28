@@ -6,9 +6,10 @@ services:
     networks:
       - cidr_watcher_internal_network
     volumes:
-      # Mount the local .env and dest folder (create a local dest folder first or update to another destination folder)
-      # Be sure the destination host folder as the correct rights under Linux (UID: 1000 and GID 1000)
+      # Mount environment file
       - ./.env:/app/.env:ro
+      # Mount watch list
+      - ./watch_list.txt:/app/watch_list.txt:ro
       # Mount Mysql socket from outside the container to inside the container
       - /var/run/mysqld/mysqld.sock:/var/run/mysqld/mysqld.sock:ro
       # Mount InfluxDB socket from outside the container to inside the container

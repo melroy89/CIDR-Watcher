@@ -6,6 +6,31 @@ Configuration is via environment variables (or a `.env` file for development). S
 
 In my setup we use an external MySQL server and an external InfluxDB (both outside of Docker).
 
+## Production
+
+### Environment variables options
+
+You need to set some settings using environment variables, for that we use the `.env` file. You can use the [.env.example](.env.example) file as template:
+
+```sh
+cp .env.example .env
+```
+
+### Docker Compose
+
+In production we use Docker Compose, see [compose.yaml](compose.yaml) file to start the Docker container.
+
+Start the container using: `docker compose up` or start in the background using: `docker compose up -d`.  
+_Note:_ If you installed Docker Compose manually, the script name is `docker-compose` instead of `docker compose`.
+
+---
+
+Instead of using Docker Compose, you could also use `docker run` but that is **not** advised. Anyway, here is an example of `docker run` command:
+
+```sh
+docker run -it -v $(pwd)/.env:/app/.env -v $(pwd)/watch_list.txt:/app/watch_list.txt --rm registry.melroy.org/melroy/cidr-watcher/cidr-watcher:latest
+```
+
 ## Development
 
 ### Requirements
@@ -19,7 +44,6 @@ You need to set some settings using environment variables, for that we use the `
 ```sh
 cp .env.example .env
 ```
-
 
 ### Start dev
 

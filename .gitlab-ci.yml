@@ -1,4 +1,15 @@
-image: golang:latest
+default:
+  image: golang:latest
+
+  cache:
+    key:
+      files:
+        - go.mod
+    paths:
+      - .go/pkg/mod/
+
+variables:
+  GOPATH: $CI_PROJECT_DIR/.go
 
 stages:
   - test
