@@ -1,6 +1,6 @@
-# CIDR Watch
+# CIDR Watcher
 
-CIDR Watch is a small Go-based daemon that monitors InfluxDB access logs and checks remote IPs against a configurable watch list of CIDR ranges (by default in `watch_list.txt`). Matched IPs are recorded in a MySQL table (`audit_ips`) and, optionally, email notifications are sent when a given IP exceeds a configured hit threshold.
+CIDR Watcher is a small Go-based daemon that monitors InfluxDB access logs and checks remote IPs against a configurable watch list of CIDR ranges (by default in `watch_list.txt`). Matched IPs are recorded in a MySQL table (`audit_ips`) and, optionally, email notifications are sent when a given IP exceeds a configured hit threshold.
 
 Configuration is via environment variables (or a `.env` file for development). See the Development section below for usage and environment options.
 
