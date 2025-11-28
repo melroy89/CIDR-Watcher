@@ -11,10 +11,8 @@ services:
       - ./.env:/app/.env:ro
       # Mount Mysql socket from outside the container to inside the container
       - /var/run/mysqld/mysqld.sock:/var/run/mysqld/mysqld.sock:ro
-    # InfluxDB is running outside of this Docker setup,
-    # so we need to map host.docker.internal to host gateway.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # Mount InfluxDB socket from outside the container to inside the container
+      - /var/run/influxdb/influxdb.sock:/var/run/influxdb/influxdb.sock:ro
 
 networks:
   cidr_watcher_internal_network:
