@@ -28,7 +28,7 @@ const (
 	auditStateRowID       = 1
 	defaultMailFromName   = "CIDR Watcher"
 	defaultMailFromAddr   = "no-reply@melroy.org"
-	defaultMailThreshold  = 10
+	defaultMailThreshold  = int64(10)
 )
 
 type Config struct {
@@ -44,7 +44,7 @@ type Config struct {
 	MailFromName   string
 	MailFromAddr   string
 	MailTo         string
-	MailThreshold  int
+	MailThreshold  int64
 }
 
 type Watcher struct {
@@ -171,8 +171,8 @@ func loadConfig() Config {
 	mailTo := os.Getenv("MAIL_TO")
 	mailThreshold := defaultMailThreshold
 	if mt := os.Getenv("ALERT_HIT_THRESHOLD"); mt != "" {
-		if vi, err := strconv.Atoi(mt); err == nil {
-			mailThreshold = vi
+		if number, err := strconv.ParseInt(mt, 10, 64); err == nil {
+			mailThreshold = number
 		} else {
 			log.Printf("invalid ALERT_HIT_THRESHOLD %q, using default %d: %v", mt, defaultMailThreshold, err)
 		}
@@ -294,12 +294,12 @@ func (w *Watcher) loadCIDRs() error {
 	w.mu.Lock()
 	w.cidrs = list
 	w.mu.Unlock()
-	log.Printf("loaded %d cidrs from %s", len(list), path)
+	log.Printf("loaded %d CIDRs/IPs from %s", len(list), path)
 	return nil
 }
 
 func (w *Watcher) loadState() error {
-	// ensure audit_state row exists. Use transaction for safety.
+	// Use transaction for safety.
 	tx, err := w.sqlDB.Begin()
 	if err != nil {
 		return err
@@ -562,8 +562,8 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 	}
 
 	// if we just crossed the threshold, send notification
-	if int(oldHits.Int64) < w.cfg.MailThreshold && int(newHits) >= w.cfg.MailThreshold {
-		if err := w.sendNotification(remoteIp, int(newHits)); err != nil {
+	if oldHits.Int64 < w.cfg.MailThreshold && newHits >= w.cfg.MailThreshold {
+		if err := w.sendNotification(remoteIp, newHits); err != nil {
 			log.Printf("failed to send notification for %s: %v", remoteIp, err)
 		} else {
 			// log success
@@ -573,7 +573,7 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 	return nil
 }
 
-func (w *Watcher) sendNotification(ip string, hits int) error {
+func (w *Watcher) sendNotification(ip string, hits int64) error {
 	// If no recipient is configured then the notification is optional; do nothing and return success.
 	if strings.TrimSpace(w.cfg.MailTo) == "" {
 		log.Printf("notification suppressed for %s (%d hits): no MAIL_TO configured", ip, hits)
