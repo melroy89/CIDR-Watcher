@@ -53,7 +53,7 @@ type Watcher struct {
 	mu            sync.RWMutex
 	running       bool
 	cfg           Config
-	influxCli     *influx.Client
+	influxClient  *influx.Client
 	sqlDB         *sql.DB
 	cidrs         []*net.IPNet
 	lastProcessed int64 // unix nanoseconds
@@ -235,11 +235,11 @@ func (w *Watcher) init() error {
 		UserAgent:  "CIDRWatcher",
 	}
 
-	c, err := influx.NewClient(cfg)
+	con, err := influx.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("create influx client: %w", err)
 	}
-	w.influxCli = c
+	w.influxClient = con
 
 	// mysql
 	db, err := sql.Open("mysql", w.cfg.MySQLDSN)
@@ -357,7 +357,7 @@ func (w *Watcher) pollOnce() error {
 		q = fmt.Sprintf("SELECT time, remote_ip FROM %s WHERE time > '%s' ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, time, w.cfg.InfluxLimit)
 	}
 
-	resp, err := queryInflux(w.influxCli, w.cfg.InfluxDB, q)
+	resp, err := queryInflux(w.influxClient, w.cfg.InfluxDB, q)
 	if err != nil {
 		return fmt.Errorf("influx query: %w", err)
 	}
@@ -495,12 +495,12 @@ func (w *Watcher) pollOnce() error {
 	return nil
 }
 
-func queryInflux(c *influx.Client, db, cmd string) ([]influx.Result, error) {
+func queryInflux(con *influx.Client, db, cmd string) ([]influx.Result, error) {
 	q := influx.Query{
 		Command:  cmd,
 		Database: db,
 	}
-	resp, err := c.Query(q)
+	resp, err := con.Query(q)
 	if err != nil {
 		return nil, err
 	}
