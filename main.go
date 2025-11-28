@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"database/sql"
 	"flag"
 	"fmt"
@@ -15,7 +14,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	influx "github.com/influxdata/influxdb1-client/v2"
+	influx "github.com/influxdata/influxdb1-client"
 	"github.com/joho/godotenv"
 	mail "github.com/wneessen/go-mail"
 )
@@ -23,7 +22,7 @@ import (
 const (
 	defaultWatchFile      = "./watch_list.txt"
 	defaultPollInterval   = 30
-	defaultReloadInterval = 500
+	defaultReloadInterval = 1500
 	defaultInfluxLimit    = 5000
 	influxMeasurement     = "nginx_access_log"
 	auditStateRowID       = 1
@@ -33,7 +32,7 @@ const (
 )
 
 type Config struct {
-	InfluxAddr     string
+	InfluxUnixSock string
 	InfluxDB       string
 	InfluxUser     string
 	InfluxPass     string
@@ -49,11 +48,12 @@ type Config struct {
 }
 
 type Watcher struct {
+	mu            sync.RWMutex
+	running       bool
 	cfg           Config
-	influxCli     influx.Client
+	influxCli     *influx.Client
 	sqlDB         *sql.DB
 	cidrs         []*net.IPNet
-	cidrsMu       sync.RWMutex
 	lastProcessed int64 // unix nanoseconds
 }
 
@@ -94,8 +94,36 @@ func main() {
 	// main loop
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
+	w.pollOnce()
 	for {
-		err := w.pollOnce(context.Background())
+		err := w.pollOnce()
+		if err != nil {
+			log.Printf("poll error: %v", err)
+		}
+		<-ticker.C
+	}
+}
+
+func (w *Watcher) Start() error {
+	w.mu.Lock()
+	if w.running {
+		w.mu.Unlock()
+		return nil
+	}
+	w.running = true
+	w.mu.Unlock()
+
+	// Start loop
+	go w.loop()
+	return nil
+}
+
+func (w *Watcher) loop() {
+	ticker := time.NewTicker(w.cfg.PollInterval)
+	defer ticker.Stop()
+	w.pollOnce()
+	for {
+		err := w.pollOnce()
 		if err != nil {
 			log.Printf("poll error: %v", err)
 		}
@@ -149,29 +177,30 @@ func loadConfig() Config {
 			log.Printf("invalid ALERT_HIT_THRESHOLD %q, using default %d: %v", mt, defaultMailThreshold, err)
 		}
 	}
-	// influx / mysql config
-	influxAddr := os.Getenv("INFLUX_ADDR")
-	if influxAddr == "" {
-		influxAddr = "http://127.0.0.1:8086"
-	}
-	influxDB := os.Getenv("INFLUX_DB")
+	// influx
+	influxDB := strings.TrimSpace(os.Getenv("INFLUX_DB"))
 	if influxDB == "" {
 		influxDB = "telegraf"
 	}
-	influxUser := os.Getenv("INFLUX_USER")
-	influxPass := os.Getenv("INFLUX_PASS")
+	influxUser := strings.TrimSpace(os.Getenv("INFLUX_USER"))
+	influxPass := strings.TrimSpace(os.Getenv("INFLUX_PASS"))
+	influxUnixSock := strings.TrimSpace(os.Getenv("INFLUX_UNIX_SOCKET"))
+	if influxUnixSock == "" {
+		influxUnixSock = "/var/run/influxdb/influxdb.sock"
+	}
+	// mysql
 	mysqlDSN := os.Getenv("MYSQL_DSN")
 	// Default to unix socket at /var/run/mysqld/mysqld.sock when MYSQL_DSN not provided
 	if mysqlDSN == "" {
-		mysqlDSN = "root:password@unix(/var/run/mysqld/mysqld.sock)/auditdb?parseTime=true"
+		mysqlDSN = "root:password@unix(/var/run/mysqld/mysqld.sock)/audit?parseTime=true"
 	}
-	watchFile := os.Getenv("WATCH_LIST_FILE")
+	watchFile := strings.TrimSpace(os.Getenv("WATCH_LIST_FILE"))
 	if watchFile == "" {
 		watchFile = defaultWatchFile
 	}
 
 	return Config{
-		InfluxAddr:     influxAddr,
+		InfluxUnixSock: influxUnixSock,
 		InfluxDB:       influxDB,
 		InfluxUser:     influxUser,
 		InfluxPass:     influxPass,
@@ -188,13 +217,16 @@ func loadConfig() Config {
 }
 
 func (w *Watcher) init() error {
-	// influx client
-	c, err := influx.NewHTTPClient(influx.HTTPConfig{
-		Addr:     w.cfg.InfluxAddr,
-		Username: w.cfg.InfluxUser,
-		Password: w.cfg.InfluxPass,
-		Timeout:  10 * time.Second,
-	})
+	// influx client (use socket file)
+	cfg := influx.Config{
+		Username:   w.cfg.InfluxUser,
+		Password:   w.cfg.InfluxPass,
+		UnixSocket: w.cfg.InfluxUnixSock,
+		Timeout:    10 * time.Second,
+		UserAgent:  "CIDRWatcher",
+	}
+
+	c, err := influx.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("create influx client: %w", err)
 	}
@@ -241,8 +273,10 @@ func (w *Watcher) loadCIDRs() error {
 		if !strings.Contains(line, "/") {
 			// treat single IP as /32 or /128
 			if strings.Contains(line, ":") {
+				// ipv6
 				line = line + "/128"
 			} else {
+				// ipv4
 				line = line + "/32"
 			}
 		}
@@ -257,9 +291,9 @@ func (w *Watcher) loadCIDRs() error {
 		return err
 	}
 
-	w.cidrsMu.Lock()
+	w.mu.Lock()
 	w.cidrs = list
-	w.cidrsMu.Unlock()
+	w.mu.Unlock()
 	log.Printf("loaded %d cidrs from %s", len(list), path)
 	return nil
 }
@@ -303,15 +337,15 @@ func (w *Watcher) loadState() error {
 	return nil
 }
 
-func (w *Watcher) pollOnce(ctx context.Context) error {
+func (w *Watcher) pollOnce() error {
 	// build query
 	var q string
 	if w.lastProcessed == 0 {
 		q = fmt.Sprintf("SELECT time, remote_ip FROM %s ORDER BY time ASC LIMIT %d", influxMeasurement, w.cfg.InfluxLimit)
 	} else {
 		// convert lastProcessed (ns) -> RFC3339Nano
-		t := time.Unix(0, w.lastProcessed).UTC().Format(time.RFC3339Nano)
-		q = fmt.Sprintf("SELECT time, remote_ip FROM %s WHERE time > '%s' ORDER BY time ASC LIMIT %d", influxMeasurement, t, w.cfg.InfluxLimit)
+		time := time.Unix(0, w.lastProcessed).UTC().Format(time.RFC3339Nano)
+		q = fmt.Sprintf("SELECT time, remote_ip FROM %s WHERE time > '%s' ORDER BY time ASC LIMIT %d", influxMeasurement, time, w.cfg.InfluxLimit)
 	}
 
 	resp, err := queryInflux(w.influxCli, w.cfg.InfluxDB, q)
@@ -329,25 +363,55 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 	var processed int
 	for _, res := range resp {
 		if res.Series == nil {
+			// no data
 			continue
 		}
 		for _, series := range res.Series {
 			// find indices for time and remote_ip
 			timeIdx := -1
-			ipIdx := -1
+			remoteIpIdx := -1
+			userAgentIdx := -1
+			bodySentBytesIdx := -1
+			domainnameIdx := -1
+			httpMethodIdx := -1
+			referrerIdx := -1
+			responseCodeIdx := -1
+			urlIdx := -1
 			for i, col := range series.Columns {
 				if col == "time" {
 					timeIdx = i
 				}
+				if col == "agent" {
+					userAgentIdx = i
+				}
+				if col == "body_sent_bytes" {
+					bodySentBytesIdx = i
+				}
+				if col == "domainname" {
+					domainnameIdx = i
+				}
+				if col == "http_method" {
+					httpMethodIdx = i
+				}
+				if col == "referrer" {
+					referrerIdx = i
+				}
 				if col == "remote_ip" {
-					ipIdx = i
+					remoteIpIdx = i
+				}
+				if col == "response_code" {
+					responseCodeIdx = i
+				}
+				if col == "url" {
+					urlIdx = i
 				}
 			}
+
 			if timeIdx == -1 {
 				log.Printf("series missing time column, skipping")
 				continue
 			}
-			if ipIdx == -1 {
+			if remoteIpIdx == -1 {
 				// nothing to check
 				continue
 			}
@@ -375,18 +439,34 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 				}
 
 				// remote_ip column may be string or nil
-				var ipStr string
-				if row[ipIdx] != nil {
-					ipStr, _ = row[ipIdx].(string)
+				var remoteIp string
+				var userAgent string
+				var bodySentBytes int64
+				var domainname string
+				var httpMethod string
+				var referrer string
+				var responseCode int
+				var url string
+				if row[remoteIpIdx] != nil {
+					remoteIp, _ = row[remoteIpIdx].(string)
+					userAgent, _ = row[userAgentIdx+1].(string)
+					bodySentBytes, _ = row[bodySentBytesIdx+1].(int64)
+					domainname, _ = row[domainnameIdx+1].(string)
+					httpMethod, _ = row[httpMethodIdx+1].(string)
+					referrer, _ = row[referrerIdx+1].(string)
+					responseCode, _ = row[responseCodeIdx+1].(int)
+					url, _ = row[urlIdx+1].(string)
 				}
-				if ipStr == "" {
+				if remoteIp == "" {
+					// No remote IP? That is weird, skip.
+					log.Printf("row with empty remote_ip, skipping")
 					continue
 				}
 
-				// check cidrs
-				if w.ipMatchesAny(ipStr) {
-					if err := w.upsertIP(ipStr); err != nil {
-						log.Printf("upsert ip %s error: %v", ipStr, err)
+				// check if IP matches watch list
+				if w.ipMatchesWatchList(remoteIp) {
+					if err := w.upsertIP(remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url); err != nil {
+						log.Printf("upsert remote ip %s error: %v", remoteIp, err)
 					}
 				}
 			}
@@ -406,7 +486,7 @@ func (w *Watcher) pollOnce(ctx context.Context) error {
 	return nil
 }
 
-func queryInflux(c influx.Client, db, cmd string) ([]influx.Result, error) {
+func queryInflux(c *influx.Client, db, cmd string) ([]influx.Result, error) {
 	q := influx.Query{
 		Command:  cmd,
 		Database: db,
@@ -424,13 +504,13 @@ func queryInflux(c influx.Client, db, cmd string) ([]influx.Result, error) {
 	return resp.Results, nil
 }
 
-func (w *Watcher) ipMatchesAny(ipStr string) bool {
+func (w *Watcher) ipMatchesWatchList(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
-	w.cidrsMu.RLock()
-	defer w.cidrsMu.RUnlock()
+	w.mu.RLock()
+	defer w.mu.RUnlock()
 	for _, n := range w.cidrs {
 		if n.Contains(ip) {
 			return true
@@ -439,7 +519,8 @@ func (w *Watcher) ipMatchesAny(ipStr string) bool {
 	return false
 }
 
-func (w *Watcher) upsertIP(ip string) error {
+// upsertIP updates or inserts the remote IP in audit_ips table, increments hit count, and sends notification if threshold crossed.
+func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int, url string) error {
 	// perform a transaction to atomically update and capture new hit count
 	tx, err := w.sqlDB.Begin()
 	if err != nil {
@@ -447,11 +528,11 @@ func (w *Watcher) upsertIP(ip string) error {
 	}
 
 	var oldHits sql.NullInt64
-	err = tx.QueryRow("SELECT hits FROM audit_ips WHERE ip = ? FOR UPDATE", ip).Scan(&oldHits)
+	err = tx.QueryRow("SELECT hits FROM audit_ips WHERE ip = ? FOR UPDATE", remoteIp).Scan(&oldHits)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// insert
-			_, err = tx.Exec("INSERT INTO audit_ips (ip, hits, last_seen) VALUES (?, 1, NOW())", ip)
+			_, err = tx.Exec("INSERT INTO audit_ips (ip, hits, last_user_agent, last_body_sent_bytes, last_domainname, last_http_method, last_referrer, last_response_code, last_url) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)", remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url)
 			if err != nil {
 				_ = tx.Rollback()
 				return err
@@ -470,7 +551,7 @@ func (w *Watcher) upsertIP(ip string) error {
 
 	// increment
 	newHits := oldHits.Int64 + 1
-	_, err = tx.Exec("UPDATE audit_ips SET hits = ?, last_seen = NOW(), updated_at = NOW() WHERE ip = ?", newHits, ip)
+	_, err = tx.Exec("UPDATE audit_ips SET hits = ?, last_user_agent = ?, last_body_sent_bytes = ?, last_domainname = ?, last_http_method = ?, last_referrer = ?, last_response_code = ?, last_url = ? WHERE ip = ?", newHits, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url, remoteIp)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -480,13 +561,13 @@ func (w *Watcher) upsertIP(ip string) error {
 		return err
 	}
 
-	// if we crossed the threshold, send notification
+	// if we just crossed the threshold, send notification
 	if int(oldHits.Int64) < w.cfg.MailThreshold && int(newHits) >= w.cfg.MailThreshold {
-		if err := w.sendNotification(ip, int(newHits)); err != nil {
-			log.Printf("failed to send notification for %s: %v", ip, err)
+		if err := w.sendNotification(remoteIp, int(newHits)); err != nil {
+			log.Printf("failed to send notification for %s: %v", remoteIp, err)
 		} else {
 			// log success
-			log.Printf("sent notification: %s reached %d hits", ip, newHits)
+			log.Printf("sent notification: %s reached %d hits", remoteIp, newHits)
 		}
 	}
 	return nil

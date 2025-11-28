@@ -2,16 +2,23 @@
 -- Creates the minimal DB schema for CIDR Watcher daemon.
 
 -- 1) database creation (optional)
-CREATE DATABASE IF NOT EXISTS auditdb CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
-USE auditdb;
+CREATE DATABASE IF NOT EXISTS audit CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+USE audit;
 
 -- 2) audit_ips: records hits per IP (supports IPv4 + IPv6)
 CREATE TABLE IF NOT EXISTS audit_ips (
     ip VARCHAR(45) PRIMARY KEY,
     hits INT UNSIGNED NOT NULL DEFAULT 1,
+    last_user_agent VARCHAR(255) NULL,
+    last_body_sent_bytes BIGINT UNSIGNED NULL,
+    last_domainname VARCHAR(255) NULL,
+    last_http_method VARCHAR(10) NULL,
+    last_referrer VARCHAR(2048) NULL,
+    last_remote_ip VARCHAR(45) NULL,
+    last_response_code INT NULL,
+    last_url VARCHAR(2048) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    last_seen TIMESTAMP NULL
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- 3) audit_state: single-row table storing last processed Influx timestamp (unix nanoseconds)
