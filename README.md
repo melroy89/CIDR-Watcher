@@ -2,7 +2,7 @@
 
 CIDR Watcher is a small Go-based daemon that monitors InfluxDB access logs and checks remote IPs against a configurable watch list of CIDR ranges (by default in `watch_list.txt`). Matched IPs are recorded in a MySQL table (`audit_ips`) and, optionally, email notifications are sent when a given IP exceeds a configured hit threshold.
 
-Configuration is via environment variables (or a `.env` file for development). See the Development section below for usage and environment options.
+Configuration is via environment variables (using a `.env` file). See the section below for usage.
 
 In my setup we use an external MySQL server and an external InfluxDB (both outside of Docker).
 
@@ -28,7 +28,7 @@ _Note:_ If you installed Docker Compose manually, the script name is `docker-com
 Instead of using Docker Compose, you could also use `docker run` but that is **not** advised. Anyway, here is an example of `docker run` command:
 
 ```sh
-docker run -it -v $(pwd)/.env:/app/.env -v $(pwd)/watch_list.txt:/app/watch_list.txt --rm registry.melroy.org/melroy/cidr-watcher/cidr-watcher:latest
+docker run -it -v $(pwd)/.env:/app/.env -v $(pwd)/watch_list.txt:/app/watch_list.txt -v /var/run/mysqld/mysqld.sock:/var/run/mysqld/mysqld.sock --rm --add-host=host.docker.internal:host-gateway registry.melroy.org/melroy/cidr-watcher/cidr-watcher:latest
 ```
 
 ## Development
@@ -60,5 +60,5 @@ Run: `go build .`
 Assuming you already fulfilled the requirements above.
 
 1. Clone the project: `git clone git@gitlab.melroy.org:melroy/cidr-watcher.git`
-2. Prepare the `.env` (see [.env.example](.env.example) file), like setting the `INFLUX_DB` and `INFLUX_USER` environment variables.
+2. Prepare the `.env` (see [.env.example](.env.example) file), like setting the `INFLUX_DB` and `INFLUX_MEASUREMENT` environment variables.
 3. To start the bot by executing: `go run .`
