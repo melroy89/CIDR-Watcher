@@ -2,7 +2,7 @@
 cidr-watcher
 
 # Ignore the watch list
-.txt
+*.txt
 
 # Test binary, built with `go test -c`
 *.test
