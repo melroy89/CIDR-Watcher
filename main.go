@@ -32,7 +32,7 @@ const (
 	defaultMailServer        = "smtp.gmail.com"
 	defaultMailFromName      = "CIDR Watcher"
 	defaultMailFromAddr      = "no-reply@melroy.org"
-	defaultMailThreshold     = int64(10)
+	defaultMailThreshold     = int64(20)
 	influxPrecision          = "ns"
 )
 
@@ -152,11 +152,11 @@ func loadConfig() Config {
 	}
 	mailTo := os.Getenv("MAIL_TO")
 	mailThreshold := defaultMailThreshold
-	if mt := os.Getenv("ALERT_HIT_THRESHOLD"); mt != "" {
+	if mt := os.Getenv("MAIL_ALERT_HIT_THRESHOLD"); mt != "" {
 		if number, err := strconv.ParseInt(mt, 10, 64); err == nil {
 			mailThreshold = number
 		} else {
-			log.Printf("invalid ALERT_HIT_THRESHOLD %q, using default %d: %v", mt, defaultMailThreshold, err)
+			log.Printf("invalid MAIL_ALERT_HIT_THRESHOLD %q, using default %d: %v", mt, defaultMailThreshold, err)
 		}
 	}
 	// influx
