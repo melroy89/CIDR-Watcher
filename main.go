@@ -321,7 +321,7 @@ func (w *Watcher) pollOnce() error {
 			domainname    string
 			httpMethod    string
 			referrer      string
-			responseCode  int
+			responseCode  int64
 			url           string
 		)
 		for i, colName := range series.Columns {
@@ -369,7 +369,7 @@ func (w *Watcher) pollOnce() error {
 			}
 			if colName == "response_code" {
 				if n, ok := row[i].(json.Number); ok {
-					responseCode, _ = strconv.Atoi(n.String())
+					responseCode, _ = n.Int64()
 				}
 			}
 			if colName == "url" {
@@ -415,7 +415,7 @@ func (w *Watcher) ipMatchesWatchList(ipStr string) bool {
 }
 
 // upsertIP updates or inserts the remote IP in audit_ips table, increments hit count, and sends notification if threshold crossed.
-func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int, url string) error {
+func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int64, url string) error {
 	// perform a transaction to atomically update and capture new hit count
 	tx, err := w.sqlDB.Begin()
 	if err != nil {
@@ -427,7 +427,7 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// insert
-			_, err = tx.Exec("INSERT INTO audit_ips (ip, hits, last_user_agent, last_body_sent_bytes, last_domainname, last_http_method, last_referrer, last_response_code, last_url) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)", remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url)
+			_, err = tx.Exec("INSERT INTO audit_ips (ip, hits, last_user_agent, last_body_sent_bytes, last_domainname, last_http_method, last_referrer, last_response_status_code, last_path) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)", remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url)
 			if err != nil {
 				_ = tx.Rollback()
 				return err
@@ -446,7 +446,7 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 
 	// increment
 	newHits := oldHits.Int64 + 1
-	_, err = tx.Exec("UPDATE audit_ips SET hits = ?, last_user_agent = ?, last_body_sent_bytes = ?, last_domainname = ?, last_http_method = ?, last_referrer = ?, last_response_code = ?, last_url = ? WHERE ip = ?", newHits, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url, remoteIp)
+	_, err = tx.Exec("UPDATE audit_ips SET hits = ?, last_user_agent = ?, last_body_sent_bytes = ?, last_domainname = ?, last_http_method = ?, last_referrer = ?, last_response_status_code = ?, last_path = ? WHERE ip = ?", newHits, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url, remoteIp)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -458,7 +458,7 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 
 	// if we just crossed the threshold, send notification
 	if oldHits.Int64 < w.cfg.MailThreshold && newHits >= w.cfg.MailThreshold {
-		if err := w.sendNotification(remoteIp, newHits); err != nil {
+		if err := w.sendNotification(remoteIp, newHits, domainname, url, responseCode); err != nil {
 			log.Printf("failed to send notification for %s: %v", remoteIp, err)
 		} else {
 			// log success
@@ -468,14 +468,14 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 	return nil
 }
 
-func (w *Watcher) sendNotification(ip string, hits int64) error {
+func (w *Watcher) sendNotification(ip string, hits int64, domainname string, url string, responseCode int64) error {
 	// If no recipient is configured then the notification is optional; do nothing and return success.
 	if strings.TrimSpace(w.cfg.MailTo) == "" {
 		log.Printf("notification suppressed for %s (%d hits): no MAIL_TO configured", ip, hits)
 		return nil
 	}
 	m := mail.NewMsg()
-	body := fmt.Sprintf("IP %s reached %d hits", ip, hits)
+	body := fmt.Sprintf("IP %s reached %d hits. With latest request URL: %s%s with status code: %d", ip, hits, domainname, url, responseCode)
 	m.SetBodyString(mail.TypeTextPlain, body)
 	if err := m.FromFormat(w.cfg.MailFromName, w.cfg.MailFromAddr); err != nil {
 		return fmt.Errorf("set from: %w", err)
