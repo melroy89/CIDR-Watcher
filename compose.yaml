@@ -4,7 +4,7 @@ services:
     container_name: cidr-watcher
     restart: always
     networks:
-      - cidr_watcher_internal_network
+      - cidr_watcher_external_network
     volumes:
       # Mount environment file
       - ./.env:/app/.env:ro
@@ -16,5 +16,5 @@ services:
       - "host.docker.internal:host-gateway"
 
 networks:
-  cidr_watcher_internal_network:
-    internal: true
+  cidr_watcher_external_network:
+
