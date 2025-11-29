@@ -1,5 +1,7 @@
 FROM golang:1.25
 
+ARG DEBIAN_FRONTEND=noninteractive
+
 WORKDIR /app
 
 RUN apt update && apt install -y sendmail
