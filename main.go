@@ -252,6 +252,8 @@ func (w *Watcher) init() error {
 		return err
 	}
 
+	log.Printf("initially loaded %d CIDRs/IPs from %s file. This file will be auto-reload every %s.", len(w.cidrs), w.cfg.WatchFile, w.cfg.ReloadInterval)
+
 	return nil
 }
 
@@ -295,7 +297,6 @@ func (w *Watcher) loadCIDRs() error {
 	w.mu.Lock()
 	w.cidrs = list
 	w.mu.Unlock()
-	log.Printf("loaded %d CIDRs/IPs from %s", len(list), path)
 	return nil
 }
 
