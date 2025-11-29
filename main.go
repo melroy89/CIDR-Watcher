@@ -95,7 +95,7 @@ func main() {
 		}
 	}()
 
-	// main loop
+	// main loop (blocking)
 	w.loop()
 }
 
@@ -298,8 +298,6 @@ func (w *Watcher) pollOnce() error {
 	} else {
 		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s WHERE time > %d ORDER BY time DESC LIMIT %d", w.cfg.InfluxMeasurement, w.lastTimestamp, w.cfg.InfluxLimit)
 	}
-
-	log.Printf("InfluxDB Query: %s", q)
 	newQuery := client.NewQuery(q, w.cfg.InfluxDB, influxPrecision)
 	resp, err := w.influxClient.Query(newQuery)
 	if err != nil || resp.Error() != nil {
@@ -321,7 +319,7 @@ func (w *Watcher) pollOnce() error {
 			domainname    string
 			httpMethod    string
 			referrer      string
-			responseCode  int64
+			responseCode  int
 			url           string
 		)
 		for i, colName := range series.Columns {
@@ -368,8 +366,15 @@ func (w *Watcher) pollOnce() error {
 				}
 			}
 			if colName == "response_code" {
-				if n, ok := row[i].(json.Number); ok {
-					responseCode, _ = n.Int64()
+				if s, ok := row[i].(string); ok {
+					responseCode, _ = strconv.Atoi(s)
+				} else {
+					// fallback: try for number?
+					if n, ok := row[i].(json.Number); ok {
+						if v, err := n.Int64(); err == nil {
+							responseCode = int(v)
+						}
+					}
 				}
 			}
 			if colName == "url" {
@@ -415,7 +420,7 @@ func (w *Watcher) ipMatchesWatchList(ipStr string) bool {
 }
 
 // upsertIP updates or inserts the remote IP in audit_ips table, increments hit count, and sends notification if threshold crossed.
-func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int64, url string) error {
+func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int, url string) error {
 	// perform a transaction to atomically update and capture new hit count
 	tx, err := w.sqlDB.Begin()
 	if err != nil {
@@ -459,19 +464,18 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 	// if we just crossed the threshold, send notification
 	if oldHits.Int64 < w.cfg.MailThreshold && newHits >= w.cfg.MailThreshold {
 		if err := w.sendNotification(remoteIp, newHits, domainname, url, responseCode); err != nil {
-			log.Printf("failed to send notification for %s: %v", remoteIp, err)
+			log.Printf("failed to send notification for %s using email: %v", remoteIp, err)
 		} else {
-			// log success
-			log.Printf("sent notification: %s reached %d hits", remoteIp, newHits)
+			log.Printf("notification: %s reached %d hits", remoteIp, newHits)
 		}
 	}
 	return nil
 }
 
-func (w *Watcher) sendNotification(ip string, hits int64, domainname string, url string, responseCode int64) error {
+func (w *Watcher) sendNotification(ip string, hits int64, domainname string, url string, responseCode int) error {
 	// If no recipient is configured then the notification is optional; do nothing and return success.
 	if strings.TrimSpace(w.cfg.MailTo) == "" {
-		log.Printf("notification suppressed for %s (%d hits): no MAIL_TO configured", ip, hits)
+		// log.Printf("notification suppressed for %s (%d hits): no MAIL_TO configured", ip, hits)
 		return nil
 	}
 	m := mail.NewMsg()
