@@ -12,8 +12,6 @@ services:
       - ./watch_list.txt:/app/watch_list.txt:ro
       # Mount Mysql socket from outside the container to inside the container
       - /var/run/mysqld/mysqld.sock:/var/run/mysqld/mysqld.sock:ro
-      # Mount InfluxDB socket from outside the container to inside the container
-      - /var/run/influxdb/influxdb.sock:/var/run/influxdb/influxdb.sock:ro
 
 networks:
   cidr_watcher_internal_network:
