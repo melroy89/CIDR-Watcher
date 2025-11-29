@@ -405,8 +405,8 @@ func (w *Watcher) pollOnce() error {
 		}
 
 		// check if IP matches watch list
-		if w.ipMatchesWatchList(remoteIp) {
-			if err := w.upsertIP(remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url); err != nil {
+		if cidr, matches := w.ipMatchesWatchList(remoteIp); matches {
+			if err := w.upsertIP(remoteIp, cidr, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url); err != nil {
 				log.Printf("upsert remote ip %s error: %v", remoteIp, err)
 			}
 		}
@@ -418,23 +418,23 @@ func (w *Watcher) pollOnce() error {
 	return nil
 }
 
-func (w *Watcher) ipMatchesWatchList(ipStr string) bool {
+func (w *Watcher) ipMatchesWatchList(ipStr string) (*net.IPNet, bool) {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
-		return false
+		return nil, false
 	}
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	for _, n := range w.cidrs {
 		if n.Contains(ip) {
-			return true
+			return n, true
 		}
 	}
-	return false
+	return nil, false
 }
 
 // upsertIP updates or inserts the remote IP in audit_ips table, increments hit count, and sends notification if threshold crossed.
-func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int, url string) error {
+func (w *Watcher) upsertIP(remoteIp string, cidr *net.IPNet, userAgent string, bodySentBytes int64, domainname string, httpMethod string, referrer string, responseCode int, url string) error {
 	// perform a transaction to atomically update and capture new hit count
 	tx, err := w.sqlDB.Begin()
 	if err != nil {
@@ -446,7 +446,7 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// insert
-			_, err = tx.Exec("INSERT INTO audit_ips (ip, hits, last_user_agent, last_body_sent_bytes, last_domainname, last_http_method, last_referrer, last_response_status_code, last_path) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)", remoteIp, userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url)
+			_, err = tx.Exec("INSERT INTO audit_ips (ip, cidr, hits, last_user_agent, last_body_sent_bytes, last_domainname, last_http_method, last_referrer, last_response_status_code, last_path) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)", remoteIp, cidr.String(), userAgent, bodySentBytes, domainname, httpMethod, referrer, responseCode, url)
 			if err != nil {
 				_ = tx.Rollback()
 				return err
@@ -477,16 +477,16 @@ func (w *Watcher) upsertIP(remoteIp string, userAgent string, bodySentBytes int6
 
 	// if we just crossed the threshold, send notification
 	if oldHits.Int64 < w.cfg.MailThreshold && newHits >= w.cfg.MailThreshold {
-		if err := w.sendNotification(remoteIp, newHits, domainname, url, responseCode); err != nil {
+		if err := w.sendNotification(remoteIp, cidr, newHits, domainname, url, httpMethod, responseCode, userAgent); err != nil {
 			log.Printf("failed to send notification for %s using email: %v", remoteIp, err)
 		} else {
-			log.Printf("notification: %s reached %d hits", remoteIp, newHits)
+			log.Printf("notification: %s in CIDR %s reached %d hits", remoteIp, cidr.String(), newHits)
 		}
 	}
 	return nil
 }
 
-func (w *Watcher) sendNotification(ip string, hits int64, domainname string, url string, responseCode int) error {
+func (w *Watcher) sendNotification(ip string, cidr *net.IPNet, hits int64, domainname string, url string, httpMethod string, responseCode int, userAgent string) error {
 	// If no recipient is configured then the notification is optional; do nothing and return success.
 	if strings.TrimSpace(w.cfg.MailTo) == "" {
 		// log.Printf("notification suppressed for %s (%d hits): no MAIL_TO configured", ip, hits)
@@ -496,7 +496,7 @@ func (w *Watcher) sendNotification(ip string, hits int64, domainname string, url
 	// Setup message
 	message := mail.NewMsg()
 	message.Subject(fmt.Sprintf("CIDR Watcher: IP %s has reached threshold", ip))
-	body := fmt.Sprintf("IP %s reached %d hits, which is over threshold %d. With latest request URL: %s%s with status code: %d", ip, hits, w.cfg.MailThreshold, domainname, url, responseCode)
+	body := fmt.Sprintf("IP %s in CIDR %s reached %d hits.\n\nWith latest %s request to %s%s and response status code: %d.\nLatest user agent: %s", ip, cidr.String(), hits, httpMethod, domainname, url, responseCode, userAgent)
 	message.SetBodyString(mail.TypeTextPlain, body)
 	if err := message.FromFormat(w.cfg.MailFromName, w.cfg.MailFromAddr); err != nil {
 		return fmt.Errorf("unable to set mail from: %w", err)

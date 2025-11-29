@@ -8,6 +8,7 @@ USE audit;
 -- 2) audit_ips: records hits per IP (supports IPv4 + IPv6)
 CREATE TABLE IF NOT EXISTS audit_ips (
     ip VARCHAR(45) PRIMARY KEY,
+    cidr VARCHAR(64) NULL,
     hits INT UNSIGNED NOT NULL DEFAULT 1,
     last_user_agent VARCHAR(255) NULL,
     last_body_sent_bytes BIGINT UNSIGNED NULL,
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS audit_state (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 -- seed initial state row if missing
-INSERT INTO audit_state (id, last_processed)
+INSERT INTO audit_state (id, last_processed_timestamp)
 SELECT 1, 0
 FROM DUAL
 WHERE NOT EXISTS (SELECT 1 FROM audit_state WHERE id = 1);
