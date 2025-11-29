@@ -23,7 +23,7 @@ import (
 const (
 	defaultWatchFile         = "./watch_list.txt"
 	defaultPollInterval      = 30
-	defaultReloadInterval    = 1500
+	defaultReloadInterval    = 3000
 	defaultInfluxLimit       = 5000
 	defaultInfluxAddr        = "http://localhost:8086"
 	defaultInfluxMeasurement = "nginx_access_log"
@@ -294,9 +294,9 @@ func (w *Watcher) pollOnce() error {
 	// build query
 	var q string
 	if w.lastTimestamp == 0 {
-		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, w.cfg.InfluxLimit)
+		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s ORDER BY time DESC LIMIT %d", w.cfg.InfluxMeasurement, w.cfg.InfluxLimit)
 	} else {
-		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s WHERE time > %d ORDER BY time ASC LIMIT %d", w.cfg.InfluxMeasurement, w.lastTimestamp, w.cfg.InfluxLimit)
+		q = fmt.Sprintf("SELECT time, remote_ip, agent, body_sent_bytes, domainname, http_method, referrer, response_code, url FROM %s WHERE time > %d ORDER BY time DESC LIMIT %d", w.cfg.InfluxMeasurement, w.lastTimestamp, w.cfg.InfluxLimit)
 	}
 
 	log.Printf("InfluxDB Query: %s", q)
@@ -312,7 +312,7 @@ func (w *Watcher) pollOnce() error {
 	}
 
 	series := resp.Results[0].Series[0]
-	for _, row := range series.Values {
+	for rowIdx, row := range series.Values {
 		var (
 			timestamp     int64
 			remoteIp      string
@@ -329,10 +329,13 @@ func (w *Watcher) pollOnce() error {
 				// timeStamp will be used in the state table later
 				timestamp, err = (row[i]).(json.Number).Int64()
 				if err != nil {
-					log.Println("Unable to parse time column from InfluxDB, skipping")
+					log.Println("Unable to parse time column from InfluxDB!?, skipping")
 					continue
 				}
-				log.Printf("Time found: %d", timestamp)
+				if rowIdx == 0 {
+					// Retrieve the latest date, which is the first row
+					w.lastTimestamp = timestamp
+				}
 			}
 			if colName == "remote_ip" {
 				if s, ok := row[i].(string); ok {
@@ -375,7 +378,6 @@ func (w *Watcher) pollOnce() error {
 				}
 			}
 		}
-		w.lastTimestamp = timestamp
 
 		if remoteIp == "" {
 			// No remote IP? That is weird, skip.

@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS audit_ips (
     last_domainname VARCHAR(255) NULL,
     last_http_method VARCHAR(10) NULL,
     last_referrer VARCHAR(2048) NULL,
-    last_remote_ip VARCHAR(45) NULL,
     last_response_code INT NULL,
     last_url VARCHAR(2048) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
