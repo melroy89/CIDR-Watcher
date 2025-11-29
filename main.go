@@ -222,7 +222,7 @@ func (w *Watcher) init() error {
 		Addr:      w.cfg.InfluxAddr,
 		Username:  w.cfg.InfluxUser,
 		Password:  w.cfg.InfluxPass,
-		Timeout:   10 * time.Second,
+		Timeout:   40 * time.Second,
 		UserAgent: "CIDRWatcher",
 	})
 	if err != nil {
