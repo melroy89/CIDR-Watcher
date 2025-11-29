@@ -29,6 +29,7 @@ const (
 	defaultInfluxMeasurement = "nginx_access_log"
 	defaultInfluxDB          = "telegraf"
 	auditStateRowID          = 1
+	defaultMailServer        = "smtp.gmail.com"
 	defaultMailFromName      = "CIDR Watcher"
 	defaultMailFromAddr      = "no-reply@melroy.org"
 	defaultMailThreshold     = int64(10)
@@ -46,6 +47,9 @@ type Config struct {
 	WatchFile         string
 	PollInterval      time.Duration
 	ReloadInterval    time.Duration
+	MailServer        string
+	MailUsername      string
+	MailPassword      string
 	MailFromName      string
 	MailFromAddr      string
 	MailTo            string
@@ -132,6 +136,12 @@ func loadConfig() Config {
 	}
 
 	// mail config
+	mailServer := os.Getenv("MAIL_SMTP_SERVER")
+	if mailServer == "" {
+		mailServer = defaultMailServer
+	}
+	mailUsername := os.Getenv("MAIL_SMTP_USER")
+	mailPassword := os.Getenv("MAIL_SMTP_PASS")
 	mailFromName := os.Getenv("MAIL_FROM_NAME")
 	if mailFromName == "" {
 		mailFromName = defaultMailFromName
@@ -196,6 +206,9 @@ func loadConfig() Config {
 		WatchFile:         watchFile,
 		PollInterval:      time.Duration(poll) * time.Second,
 		ReloadInterval:    time.Duration(reload) * time.Second,
+		MailServer:        mailServer,
+		MailUsername:      mailUsername,
+		MailPassword:      mailPassword,
 		MailFromName:      mailFromName,
 		MailFromAddr:      mailFromAddr,
 		MailTo:            mailTo,
@@ -478,18 +491,28 @@ func (w *Watcher) sendNotification(ip string, hits int64, domainname string, url
 		// log.Printf("notification suppressed for %s (%d hits): no MAIL_TO configured", ip, hits)
 		return nil
 	}
-	m := mail.NewMsg()
-	body := fmt.Sprintf("IP %s reached %d hits. With latest request URL: %s%s with status code: %d", ip, hits, domainname, url, responseCode)
-	m.SetBodyString(mail.TypeTextPlain, body)
-	if err := m.FromFormat(w.cfg.MailFromName, w.cfg.MailFromAddr); err != nil {
-		return fmt.Errorf("set from: %w", err)
+
+	// Setup message
+	message := mail.NewMsg()
+	message.Subject(fmt.Sprintf("CIDR Watcher: IP %s has reached threshold", ip))
+	body := fmt.Sprintf("IP %s reached %d hits, which is over threshold %d. With latest request URL: %s%s with status code: %d", ip, hits, w.cfg.MailThreshold, domainname, url, responseCode)
+	message.SetBodyString(mail.TypeTextPlain, body)
+	if err := message.FromFormat(w.cfg.MailFromName, w.cfg.MailFromAddr); err != nil {
+		return fmt.Errorf("unable to set mail from: %w", err)
 	}
-	if err := m.To(w.cfg.MailTo); err != nil {
-		return fmt.Errorf("set to: %w", err)
+	if err := message.To(w.cfg.MailTo); err != nil {
+		return fmt.Errorf("unable to set mail to: %w", err)
 	}
-	if err := m.WriteToSendmail(); err != nil {
-		return fmt.Errorf("send: %w", err)
+	// Deliver the mail via SMTP
+	client, err := mail.NewClient(w.cfg.MailServer, mail.WithTLSPortPolicy(mail.TLSMandatory),
+		mail.WithSMTPAuth(mail.SMTPAuthAutoDiscover), mail.WithUsername(w.cfg.MailUsername), mail.WithPassword(w.cfg.MailPassword))
+	if err != nil {
+		return fmt.Errorf("failed to create new mail delivery client: %w", err)
 	}
+	if err := client.DialAndSend(message); err != nil {
+		return fmt.Errorf("failed to deliver mail: %w", err)
+	}
+
 	return nil
 }
 
