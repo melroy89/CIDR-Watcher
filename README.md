@@ -16,6 +16,22 @@ You need to set some settings using environment variables, for that we use the `
 cp .env.example .env
 ```
 
+### Example stats query
+
+After the database is getting filled with data from InfluxDB. You can perform simple statistics on the gathered data in MySQL/MariaDB. Like use the following `SELECT` query:
+
+```sql
+SELECT
+    cidr,
+    COUNT(*) AS ip_count,
+    SUM(hits) AS total_hits
+FROM audit_ips
+GROUP BY cidr
+ORDER BY total_hits DESC, ip_count DESC;
+```
+
+Which should give you some insides of the most troublesome CIDRs.
+
 ### Docker Compose
 
 In production we use Docker Compose, see [compose.yaml](compose.yaml) file to start the Docker container.

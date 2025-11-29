@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS audit_ips (
 
 -- 3) Indexes for table audit_ips
 ALTER TABLE `audit_ips`
+  ADD KEY `cidr` (`cidr`),
   ADD KEY `hits` (`hits`),
   ADD KEY `created_at` (`created_at`),
   ADD KEY `updated_at` (`updated_at`);
