@@ -77,4 +77,4 @@ Assuming you already fulfilled the requirements above.
 
 1. Clone the project: `git clone git@gitlab.melroy.org:melroy/cidr-watcher.git`
 2. Prepare the `.env` (see [.env.example](.env.example) file), like setting the `INFLUX_DB` and `INFLUX_MEASUREMENT` environment variables.
-3. To start the bot by executing: `go run .`
+3. To start the CIDR-Watcher by executing: `go run .`
