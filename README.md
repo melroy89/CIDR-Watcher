@@ -10,7 +10,7 @@ In my setup we use an external MySQL server and an external InfluxDB (both outsi
 
 CIDR Watcher is a project created for myself, in order to monitor traffic coming from certain CIDRs (eg. monitoring a specifc [ASN](https://en.wikipedia.org/wiki/Autonomous_system_(Internet))).
 
-For example I can use CIDR Watcher to monitor [AS8075](https://ipinfo.io/AS8075), retrieve all the CIDRs via APIs from [hackertarget](https://hackertarget.com/as-ip-lookup/). Finally, CIDR Watcher can match the incoming traffic (parsed by Telegraf and stored in InfluxDB) against my predefined CIDR ``watch_list.txt` and keep track of the hits and notify me about it.
+For example, I can use CIDR Watcher to monitor [AS8075](https://ipinfo.io/AS8075) - Microsoft Datacenter, retrieve all the related CIDRs via APIs from [hackertarget](https://hackertarget.com/as-ip-lookup/) for `AS8075`. Finally, CIDR Watcher can match the incoming traffic (parsed by Telegraf and stored in InfluxDB) against this predefined CIDR `watch_list.txt` and keep track of the hits and notify me about thresholds reached by e-mail.
 
 ## Production
 
