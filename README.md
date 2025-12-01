@@ -6,6 +6,12 @@ Configuration is via environment variables (using a `.env` file). See the sectio
 
 In my setup we use an external MySQL server and an external InfluxDB (both outside of Docker).
 
+## Rationale
+
+CIDR Watcher is a project created for myself, in order to monitor traffic coming from certain CIDRs (eg. monitoring a specifc [ASN](https://en.wikipedia.org/wiki/Autonomous_system_(Internet))).
+
+For example I can use CIDR Watcher to monitor [AS8075](https://ipinfo.io/AS8075), retrieve all the CIDRs via APIs from [hackertarget](https://hackertarget.com/as-ip-lookup/). Finally, CIDR Watcher can match the incoming traffic (parsed by Telegraf and stored in InfluxDB) against my predefined CIDR ``watch_list.txt` and keep track of the hits and notify me about it.
+
 ## Production
 
 ### Environment variables options
